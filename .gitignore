@@ -1,0 +1,23 @@
+# 构建产物
+build/
+build[0-9]/
+*.idsig
+danmu-tv.apk
+danmu-probe.apk
+
+# 签名密钥（每个环境自己生成，别提交）
+keys/
+
+# 截图原图（仓库里只放压缩后的 jpg）
+docs/raw/
+
+# 与本仓库无关的本地脚本/实验残留
+deploy.sh
+lsp_sync.py
+stubs/
+
+# 系统垃圾
+.DS_Store
+Thumbs.db
+*.log
+build6.sh

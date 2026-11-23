@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">弹幕伴侣</string>
+    <string name="a11y_desc">读取 VidHub 播放器上显示的片名与进度，用于把弹幕对齐到画面。只读取界面文字，不修改播放器任何数据。</string>
+</resources>
