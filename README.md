@@ -17,6 +17,8 @@
 - **[新手说明书](docs/for-beginners.md)** — 只用遥控器和 U 盘，全程不出现命令行
 - **[进阶说明书](docs/tutorial.md)** — 会用电脑的话看这份，含自建弹幕服务器、开机自恢复、参数原理
 
+**[⬇ 下载 APK（最新版）](https://github.com/Filey-Aaron/danmaku-tv/releases/latest)** · 需要 Android 8.0+，已在小米电视 Android 9 验证
+
 ---
 
 ## 快速开始
@@ -38,7 +40,7 @@ adb shell settings put secure accessibility_enabled 1
 adb shell am start -n tv.yaohui.danmu/.SettingsActivity
 ```
 
-APK 见 [Releases](../../releases)，或直接下仓库里的 `danmu-tv-1.1.2.apk`。
+APK 见 [Releases](https://github.com/Filey-Aaron/danmaku-tv/releases/latest)，或直接下仓库里的 `danmu-tv-1.1.2.apk`。
 
 ## 为什么不用 Xposed
 
