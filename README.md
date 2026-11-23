@@ -23,7 +23,7 @@
 
 ```bash
 # 1. 装
-adb install -r danmu-tv-1.1.0.apk
+adb install -r danmu-tv-1.1.2.apk
 
 # 2. 给悬浮窗权限
 adb shell appops set tv.yaohui.danmu SYSTEM_ALERT_WINDOW allow
@@ -38,7 +38,7 @@ adb shell settings put secure accessibility_enabled 1
 adb shell am start -n tv.yaohui.danmu/.SettingsActivity
 ```
 
-APK 见 [Releases](../../releases)，或直接下仓库里的 `danmu-tv-1.1.0.apk`。
+APK 见 [Releases](../../releases)，或直接下仓库里的 `danmu-tv-1.1.2.apk`。
 
 ## 为什么不用 Xposed
 

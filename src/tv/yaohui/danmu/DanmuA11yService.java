@@ -116,6 +116,7 @@ public class DanmuA11yService extends AccessibilityService {
     private long noAnchorMs = 0L;
     private boolean hintShown = false;
     private long posLogAt = 0L;
+    private boolean audioProbeLogged = false;
     /** 自动让播放器弹控制栏（发"上"键）的节流与失败熔断 */
     private long lastNudgeAt = 0L;
     private int nudgeCount = 0;
@@ -369,6 +370,11 @@ public class DanmuA11yService extends AccessibilityService {
                 || pkg.contains("music")
                 || pkg.contains("radio")
                 || pkg.contains("podcast")
+                // 电视自带的输入源/播放器界面（HDMI、相册预览）：全屏也有声，但永远没有片名，
+                // 一挂着就是一层空弹幕，还在后台反复搜"显示器外部源"
+                || pkg.startsWith("com.xiaomi.mitv.tvplayer")
+                || pkg.startsWith("com.mitv.tvplayer")
+                || pkg.startsWith("com.mitv.gallery")
                 || pkg.startsWith("com.google.android.gms");
     }
 
@@ -431,6 +437,40 @@ public class DanmuA11yService extends AccessibilityService {
         return v;
     }
 
+    /** 这个"片名"其实是不是应用名（播放器把窗口标题当片名时报上来的那种） */
+    private boolean looksLikeAppName(String title) {
+        if (title == null) return false;
+        String t = title.trim();
+        if (t.isEmpty()) return false;
+        String l1 = appLabel(curPkg).trim();
+        if (!l1.isEmpty() && (t.equals(l1) || t.contains(l1) || l1.contains(t))) return true;
+        String l2 = appLabel(PKG_VIDHUB).trim();
+        if (!l2.isEmpty() && (t.equals(l2) || t.contains(l2))) return true;
+        return false;
+    }
+
+    /** 窗口标题里的词，出现在这里基本就是播放器/客户端的名字，不是片名 */
+    private static final String[] CLIENT_WORDS = {
+            "播放器", "影院", "影视", "视频", "爆米花", "电视", "投屏",
+            "filmly", "vidhub", "kodi", "vlc", "mx player", "player", "tv"
+    };
+
+    /**
+     * 窗口标题靠不靠谱。窗口标题十有八九就是应用名（"网易爆米花"），
+     * 而 PackageManager 里的 label 未必跟界面上那个中文名一致，光比 label 拦不住。
+     * 这里按长相判断：带季集号的直接信；否则要够长、且不含"播放器/影视/TV"这类词。
+     */
+    private boolean plausibleWindowTitle(String s) {
+        if (s == null) return false;
+        if (PlayerProbe.hasEpisode(s)) return true;         // "某剧 第 3 集"
+        if (s.length() < 6) return false;                   // "网易爆米花" 5 个字：大概率是应用名
+        String low = s.toLowerCase();
+        for (int i = 0; i < CLIENT_WORDS.length; i++) {
+            if (low.contains(CLIENT_WORDS[i])) return false;
+        }
+        return true;
+    }
+
     private String activePackage() {
         AccessibilityNodeInfo root = getRootInActiveWindow();
         if (root == null) return "";
@@ -483,9 +523,10 @@ public class DanmuA11yService extends AccessibilityService {
                         title = pr.title;
                         if (title == null && w.title != null) {
                             String wt = w.title.toString().trim();
-                            // "窗口标题 = 应用名"（MX Player / Kodi…）不是片名，别拿去搜
-                            if (wt.length() >= 2 && !wt.equals(appLabel(w.pkg))
-                                    && !PlayerProbe.looksLikeJunk(wt)) title = wt;
+                            if (wt.length() >= 2 && !PlayerProbe.looksLikeJunk(wt)
+                                    && !looksLikeAppName(wt) && plausibleWindowTitle(wt)) {
+                                title = wt;
+                            }
                         }
                         // 防抖：连着两轮读到同一个标题才认。窗口标题会闪（显示进度、暂停图标之类），
                         // 每变一次就去换片会把弹幕拉来拉去。
@@ -746,7 +787,10 @@ public class DanmuA11yService extends AccessibilityService {
             String k = sp.getString("posKey", "");
             long p = sp.getLong("posMs", -1L);
             long w = sp.getLong("posWallMs", 0L);
-            if (p >= 0 && w > 0 && k.equals(currentKey)) {
+            // 片名读不到（爆米花控制栏收起时整段都没了）时 currentKey 是空的，
+            // 这时也把上次的位置接上 —— 大不了换片时错几秒，读到真进度会立刻重锚，
+            // 总比从 0 开始把片头弹幕糊到中段强
+            if (p >= 0 && w > 0 && (k.equals(currentKey) || currentKey.isEmpty())) {
                 posMs = p;
                 gap = System.currentTimeMillis() - w;
             }
@@ -755,10 +799,7 @@ public class DanmuA11yService extends AccessibilityService {
         }
         if (posMs < 0) return;
         long now = SystemClock.uptimeMillis();
-        boolean playing = false;
-        try {
-            if (audio != null) playing = audio.isMusicActive();
-        } catch (Throwable ignored) { }
+        boolean playing = isAudioActive();
         if (playing && gap >= 0 && gap < 120000L) {
             // 在播且断线不久：位置接着往前推，误差在 1 秒内
             timeline.seed(posMs + gap, now, true);
@@ -785,6 +826,7 @@ public class DanmuA11yService extends AccessibilityService {
         String t = sp.getString("lastTitle", "");
         // 存过 "显示器外部源" / "HDMI1" 这种，说明上次是误识别，别再用它去搜
         if (t == null || t.isEmpty() || PlayerProbe.looksLikeJunk(t)) return;
+        if (looksLikeAppName(t)) return;
         MediaInfo mi = new MediaInfo();
         mi.title = t;
         mi.season = sp.getInt("lastSeason", 0);
@@ -876,6 +918,10 @@ public class DanmuA11yService extends AccessibilityService {
         if (generic) {
             if (hasPlayerUi) {
                 genericNoProgressMs = 0L;
+            } else if (audioActive) {
+                // 有声音就别急着收摊：爆米花这类播放器控制栏一收起，
+                // 节点里那行时间就整段消失/冻住，读不到进度不等于不是视频。
+                genericNoProgressMs = 0L;
             } else {
                 genericNoProgressMs += POLL_MS_GENERIC;
                 if (genericNoProgressMs >= 20000L) {
@@ -910,12 +956,36 @@ public class DanmuA11yService extends AccessibilityService {
             if (left != null) {
                 long posMs = parseTime(left);
                 if (posMs >= 0) {
-                    timeline.onSample(posMs, now);
-                    lastPos = posMs;
+                    /*
+                     * 有些播放器（比如爆米花）控制栏收起后，节点里那行时间就冻在旧值上，
+                     * 每 300ms 读到同一个数。如果照旧喂给时间轴，推算值越走越远、
+                     * 两轮后又被拽回原处 —— 弹幕就永远停在原地不动。
+                     * 所以只在进度真的变了的时候才重锚；没变的时候看声音：
+                     *   有声音 = 播放器只是不刷新文本，让墙钟继续走；
+                     *   没声音 = 真暂停，把时间轴停住。
+                     */
+                    boolean moved = lastPos < 0 || Math.abs(posMs - lastPos) >= 500L;
+                    if (moved) {
+                        timeline.onSample(posMs, now);
+                        lastPos = posMs;
+                    } else if (audioActive) {
+                        timeline.setPlaying(true, now);
+                    } else if (generic) {
+                        /*
+                         * 通用播放器不轻易判暂停。爆米花这类应用控制栏里那行时间是快照，
+                         * 停住不刷新；而这台电视又报不出真实的音频状态 —— 两个不可靠的信号
+                         * 一叠加就会把正在播的片子判成暂停，弹幕整层冻住（用户看到的就是
+                         * "弹幕卡在这里不动"）。宁可暂停时多飘几条，也不能播放时不动。
+                         */
+                        timeline.setPlaying(true, now);
+                    } else {
+                        timeline.setPlaying(false, now);
+                    }
                     if (now - posLogAt > 30000L) {
                         posLogAt = now;
                         log("pos " + (posMs / 1000L) + "s playing=" + timeline.isPlaying()
-                                + " anchor=" + timeline.hasAnchor());
+                                + " anchor=" + timeline.hasAnchor()
+                                + " moved=" + moved + " audio=" + audioActive);
                     }
                 }
             }
@@ -994,8 +1064,76 @@ public class DanmuA11yService extends AccessibilityService {
      * 暂停时把推算冻结住，弹幕才不会越跑越偏。
      */
     private boolean isAudioActive() {
+        if (audio == null) return false;
+        /*
+         * 不直接用 isMusicActive()：这台 MTK 电视走 HDMI/ARC 输出时它会误报 false，
+         * 结果视频明明在放，应用却判成「暂停」，弹幕就整层冻住不动。
+         * 改成遍历活跃播放配置，只看真正 state=STARTED 的媒体流。
+         */
         try {
-            return audio != null && audio.isMusicActive();
+            java.util.List<android.media.AudioPlaybackConfiguration> list =
+                    audio.getActivePlaybackConfigurations();
+            int size = list == null ? -1 : list.size();
+            int started = 0;
+            boolean hit = false;
+            if (list != null && !list.isEmpty()) {
+                for (int i = 0; i < list.size(); i++) {
+                    android.media.AudioPlaybackConfiguration c = list.get(i);
+                    if (c == null) continue;
+                    // 编译用的 android.jar 被裁过，没有 getPlayerState()，只能反射拿
+                    int state = -1;
+                    try {
+                        Object v = c.getClass().getMethod("getPlayerState").invoke(c);
+                        if (v instanceof Integer) state = ((Integer) v).intValue();
+                    } catch (Throwable ignored) {
+                        continue;
+                    }
+                    if (state != 2) {                  // 2 = PLAYER_STATE_STARTED
+                        continue;
+                    }
+                    started++;
+                    android.media.AudioAttributes at = c.getAudioAttributes();
+                    if (at == null) continue;
+                    int usage = at.getUsage();
+                    if (usage == android.media.AudioAttributes.USAGE_MEDIA
+                            || usage == android.media.AudioAttributes.USAGE_UNKNOWN) {
+                        hit = true;
+                        break;
+                    }
+                }
+                if (!audioProbeLogged) {
+                    audioProbeLogged = true;
+                    log("audio: list=" + size + " started=" + started + " hit=" + hit);
+                }
+                return hit;        // 列表能拿到且没有媒体流在放，就是真没声
+            }
+        } catch (Throwable ignored) {
+        }
+        // 2) AudioSystem.isStreamActive(STREAM_MUSIC)：@hide，但 Android 9 上反射还能调。
+        //    电视上这个最准 —— 上面那个列表经常只返回一条无关的提示音，看不到正在放的正片。
+        try {
+            Class<?> as = Class.forName("android.media.AudioSystem");
+            java.lang.reflect.Method m = as.getMethod("isStreamActive", int.class, int.class);
+            Object r = m.invoke(null, 3, 0);           // 3 = STREAM_MUSIC
+            if (r instanceof Boolean) {
+                boolean b = ((Boolean) r).booleanValue();
+                if (b) {
+                    if (!audioProbeLogged) {
+                        audioProbeLogged = true;
+                        log("audio: streamActive=true (AudioSystem)");
+                    }
+                    return true;
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        try {
+            boolean b = audio.isMusicActive();
+            if (!audioProbeLogged) {
+                audioProbeLogged = true;
+                log("audio: fallback isMusicActive=" + b);
+            }
+            return b;
         } catch (Throwable t) {
             return false;
         }
@@ -1030,6 +1168,9 @@ public class DanmuA11yService extends AccessibilityService {
 
     private void ensureMedia(MediaInfo info) {
         if (info == null || info.title == null || info.title.isEmpty()) return;
+        // 片名退化成应用名（"网易爆米花"/"VidHub"）时宁可什么都不做，
+        // 等真正标题或上次记住的标题顶上，别拿应用名去搜一遍再把缓存弄脏
+        if (looksLikeAppName(info.title)) return;
         info.durationMs = timeline.getDuration();
         String key = info.key();
         boolean hasData = lastItems != null && lastItemsKey.equals(key);
@@ -1064,6 +1205,11 @@ public class DanmuA11yService extends AccessibilityService {
             noAnchorMs = 0L;
             hintShown = false;
             if (overlay != null) overlay.clearDanmaku();
+            // reset 会把锚点一起清掉。如果这一轮刚好读到过进度，立刻接回来 ——
+            // 否则控制栏一收起又要靠发"上"键去唤，用户会看到控制栏莫名反复弹出
+            if (lastPos >= 0) {
+                timeline.seed(lastPos, SystemClock.uptimeMillis(), true);
+            }
         }
 
         final int seq = ++loadSeq;

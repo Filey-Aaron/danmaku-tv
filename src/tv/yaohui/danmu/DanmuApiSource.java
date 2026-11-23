@@ -130,13 +130,27 @@ public class DanmuApiSource implements DanmakuSource {
         return -1L;
     }
 
-    /** 片名可能带平台自己的修饰词，去掉后再搜一次，命中率会高一些 */
+    /** 片名可能带平台自己的修饰词，逐级剥掉后再搜，命中率会高一些 */
     private static String[] searchKeys(String title) {
-        String alt = title.replaceAll("[（(【\\[][^）)】\\]]*[）)】\\]]", " ")
-                .replaceAll("(剧场版|电影版|TV版|OVA|特别篇|剧场|国语版|粤语版|国语|粤语|完整版|未删减|蓝光|高清|4K|HD)", " ")
-                .replaceAll("\\s+", " ").trim();
-        if (alt.isEmpty() || alt.equals(title)) return new String[]{title};
-        return new String[]{title, alt};
+        java.util.LinkedHashSet<String> keys = new java.util.LinkedHashSet<String>();
+        String t = title == null ? "" : title.trim();
+        if (t.isEmpty()) return new String[0];
+        keys.add(t);
+
+        // 播放器有时把「第 1 集 基锡离奇身亡」整串当片名，先截到集号前再试
+        String noEp = t.replaceAll("\\s*第\\s*\\d{1,4}\\s*[季集话期篇].*$", "")
+                .replaceAll("\\s*[Ss]\\d{1,2}[Ee]\\d{1,3}.*$", "")
+                .trim();
+        if (!noEp.isEmpty()) keys.add(noEp);
+
+        // 再去掉括号里的补充信息和平台修饰词
+        for (String s : new java.util.ArrayList<String>(keys)) {
+            String alt = s.replaceAll("[（(【\\[][^）)】\\]]*[）)】\\]]", " ")
+                    .replaceAll("(剧场版|电影版|TV版|OVA|特别篇|剧场|国语版|粤语版|国语|粤语|完整版|未删减|蓝光|高清|4K|HD)", " ")
+                    .replaceAll("\\s+", " ").trim();
+            if (!alt.isEmpty()) keys.add(alt);
+        }
+        return keys.toArray(new String[0]);
     }
 
     private long findEpisodeBy(String kw, MediaInfo info) throws Exception {

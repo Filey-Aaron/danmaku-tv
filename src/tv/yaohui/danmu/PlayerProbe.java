@@ -44,6 +44,9 @@ public class PlayerProbe {
             "(?i)([se]\\d{1,2}[ex]?\\d{0,3}|第\\s*\\d{1,4}\\s*[集话期季篇])");
     private static final Pattern NUM_ONLY = Pattern.compile("^[\\d\\s:.,%/×xX+\\-]+$");
     private static final Pattern URL = Pattern.compile("(?i)(https?://|www\\.|\\.(com|cn|net|tv)\\b)");
+    /** 只有季/集号的文本（"第 1 季""第 12 集"）—— 选集面板里满地都是，绝不是片名 */
+    private static final Pattern ONLY_EP = Pattern.compile(
+            "^\\s*第?\\s*\\d{1,4}\\s*[季集期话篇]\\s*$|^\\s*[Ss]\\d{1,2}\\s*$");
     /**
      * 输入源/技术参数，长得像片名但根本不是：
      * 电视播 HDMI 时窗口里就写着 "HDMI1 / 3840x2160@160Hz"，拿去搜弹幕只会白跑。
@@ -142,6 +145,7 @@ public class PlayerProbe {
             if (NUM_ONLY.matcher(s).matches()) continue;
             if (TECH.matcher(s).find()) continue;           // HDMI1 / 3840x2160@160Hz 这类
             if (TIME.matcher(s).find()) continue;           // 带时间的多半是进度/时长
+            if (ONLY_EP.matcher(s).matches()) continue;     // "第 1 季" / "第 12 集"
             String low = s.toLowerCase();
             boolean junk = false;
             for (int j = 0; j < JUNK.length; j++) {
@@ -174,6 +178,11 @@ public class PlayerProbe {
         r.sample = sb.toString();
         r.videoLike = r.hasTimes && r.durMs >= 60L * 1000L;
         return r;
+    }
+
+    /** 标题里有没有季/集号（"第 3 集" / "S01E02"）：有就基本能确定是片子，而不是应用名 */
+    public static boolean hasEpisode(String s) {
+        return s != null && EP.matcher(s).find();
     }
 
     /** 明显不是片名的文本（HDMI/分辨率/输入源…），缓存里存过这种就丢掉 */
