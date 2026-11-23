@@ -36,6 +36,8 @@ public class DanmuA11yService extends AccessibilityService {
     private static final String ID_RIGHT = PKG_VIDHUB + ":id/text_right_time";
 
     private static final long POLL_MS = 300L;
+    /** 通用播放器要全树扫描，代价比按 id 找高，放宽到 500ms 一次 */
+    private static final long POLL_MS_GENERIC = 500L;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     /** 无障碍事件报来的当前界面类型："play"=播放页，"other"=VidHub 其它页，null=还不知道 */
@@ -71,6 +73,17 @@ public class DanmuA11yService extends AccessibilityService {
     private String currentKey = "";
     private MediaInfo currentInfo = new MediaInfo();
     private long lastPos = -1L;
+    /** 通用播放器这次会话已经用"从 0 开始按墙钟走"兜过底了吗 */
+    private boolean genericSeeded = false;
+    /** 通用模式下连续多久没读到进度条（用来排除 HDMI 输入源这类根本不是视频的界面） */
+    private long genericNoProgressMs = 0L;
+    /** 通用模式标题防抖：同一个标题连续读到两轮才采用 */
+    private String pendingGenericTitle = null;
+    private int pendingGenericCount = 0;
+    /** 通用模式下扫描结果的日志节流 */
+    private long lastProbeLogAt = 0L;
+    /** 这一轮轮询是不是走的"通用播放器"路径（tickNoAnchor 要靠它决定敢不敢发按键） */
+    private boolean curGeneric = false;
 
     /** 手上这集的弹幕，切换界面/暂停回来时直接复用，不必再问服务器 */
     private List<DanmakuItem> lastItems = null;
@@ -147,7 +160,7 @@ public class DanmuA11yService extends AccessibilityService {
             if (pollHandler != null) {
                 pollHandler.post(readPkgTask);
             } else {
-                guardWith("", false, false);
+                guardWith("", false, false, false);
             }
             handler.postDelayed(this, 1500L);
         }
@@ -156,59 +169,68 @@ public class DanmuA11yService extends AccessibilityService {
     private final Runnable readPkgTask = new Runnable() {
         @Override
         public void run() {
-            final String pkg;
-            final boolean audioActive = isAudioActive();
+            String pkg = "";
             boolean ui = false;
-            String pk = "";
+            boolean full = false;
+            int sw = screenW(), sh = screenH();
+            Win w = null;
+            AccessibilityNodeInfo fallback = null;
             try {
-                AccessibilityNodeInfo root = getRootInActiveWindow();
-                if (root == null) {
-                    // 播放页控制栏收起时活动窗口只剩一层 surface，拿不到根节点。
-                    // 这时从窗口列表里找 VidHub 的窗口，否则服务重启后会一直认不出在播放。
-                    root = vidHubWindowRoot();
-                }
-                if (root != null) {
-                    try {
-                        CharSequence p = root.getPackageName();
-                        pk = p == null ? "" : p.toString();
-                        ui = text(root, ID_TITLE) != null
-                                || text(root, ID_LEFT) != null
-                                || text(root, ID_RIGHT) != null;
-                    } finally {
-                        try { root.recycle(); } catch (Throwable ignored) { }
+                w = pickWindow();
+                if (w != null) {
+                    pkg = w.pkg;
+                    full = isFullscreen(w.rect, sw, sh);
+                    if (PKG_VIDHUB.equals(pkg)) {
+                        ui = text(w.root, ID_TITLE) != null
+                                || text(w.root, ID_LEFT) != null
+                                || text(w.root, ID_RIGHT) != null;
+                    } else {
+                        ui = PlayerProbe.probe(w.root, sw, sh).videoLike;
                     }
+                } else {
+                    // 没有被允许的窗口（桌面/别的应用/播放器窗口根节点拿不到）
+                    fallback = getRootInActiveWindow();
+                    pkg = pkgOf(fallback);
                 }
             } catch (Throwable t) {
-                return;
+                pkg = "";
+            } finally {
+                if (w != null) recycleQuiet(w.root);
+                recycleQuiet(fallback);
             }
-            pkg = pk;
-            final boolean playerUi = ui;
+            final String fPkg = pkg;
+            final boolean fUi = ui, fFull = full;
+            final boolean fAudio = isAudioActive();
             handler.post(new Runnable() {
                 @Override
-                public void run() { guardWith(pkg, audioActive, playerUi); }
+                public void run() { guardWith(fPkg, fAudio, fUi, fFull); }
             });
         }
     };
 
-    private void guardWith(String pkg, boolean audioActive, boolean playerUi) {
+    private void guardWith(String pkg, boolean audioActive, boolean playerUi, boolean fullscreen) {
         {
             try {
-                boolean inVidHub = PKG_VIDHUB.equals(pkg);
+                boolean isVid = PKG_VIDHUB.equals(pkg);
+                boolean supported = isSupportedPkg(pkg);
                 // VidHub 的列表页/详情页跟播放页是同一个包名，光看包名会在详情页
                 // 反复开/关弹幕层（还会弹"读不到片名"）。这里优先信无障碍事件报的界面类型。
-                boolean knownOther = "other".equals(curActivity);
-                // 声音只作辅助判据：详情页的预告片也有声，靠上面的 knownOther 优先排除；
-                // 万一事件没报界面类型，poll 那边 2.4 秒读不到播放控件也会停掉并冷却
-                boolean looksPlaying = playerUi || "play".equals(curActivity) || audioActive;
+                boolean knownOther = isVid && "other".equals(curActivity);
+                // VidHub 靠准确 id 判定；通用播放器没有 id，只能"读到进度条文本"或
+                // "全屏 + 正在出声"来判定在播。单凭有声音会把音乐 App 也当成播放器，
+                // 所以额外要求窗口几乎铺满屏幕。
+                boolean looksPlaying = isVid
+                        ? (playerUi || "play".equals(curActivity) || audioActive)
+                        : (playerUi || (audioActive && fullscreen));
 
-                if (inVidHub && knownOther) {
+                if (knownOther) {
                     // 明确在 VidHub 的列表/详情页：收摊，别在这儿开层、别发按键
                     if (sessionActive) stopSession();
-                } else if (inVidHub && !sessionActive && looksPlaying
+                } else if (supported && !sessionActive && looksPlaying
                         && SystemClock.uptimeMillis() >= suppressStartUntil) {
                     offlineCount = 0;
                     startSession();
-                } else if (inVidHub && sessionActive) {
+                } else if (supported && sessionActive) {
                     offlineCount = 0;
                     // 自愈：播放器里但弹幕层不在了（被系统回收/被自己误删）就补一块
                     // 注意必须在会话活跃时才补，否则详情页也会凭空多一块窗
@@ -220,7 +242,7 @@ public class DanmuA11yService extends AccessibilityService {
                     }
                 } else if (sessionActive && !pkg.isEmpty()) {
                     // 连续几轮都不在播放器界面才收摊。
-                    // 有声音说明还在放 VidHub（界面节点偶尔会报错包名），多给几次机会
+                    // 有声音说明还在放（界面节点偶尔会报错包名），多给几次机会
                     offlineCount++;
                     int limit = audioActive ? 12 : 5;
                     if (offlineCount >= limit) stopSession();
@@ -231,33 +253,165 @@ public class DanmuA11yService extends AccessibilityService {
         }
     }
 
-    /** 从窗口列表里找 VidHub 的窗口根节点（调用方负责 recycle），找不到返回 null */
-    private AccessibilityNodeInfo vidHubWindowRoot() {
-        java.util.List<AccessibilityWindowInfo> wins;
+    /** 一个候选播放器窗口：根节点 + 包名 + 屏幕矩形（root 由调用方 recycle） */
+    private static final class Win {
+        AccessibilityNodeInfo root;
+        String pkg = "";
+        android.graphics.Rect rect = new android.graphics.Rect();
+        CharSequence title;
+    }
+
+    /**
+     * 从窗口列表里挑当前面积最大的、允许挂弹幕的窗口。
+     * VidHub 播放页控制栏收起时 getRootInActiveWindow() 会返回 null，只有这里能拿到；
+     * 换成别的播放器（Kodi / Plex / Emby / MX / 当贝 / 系统播放器）也是同一条路。
+     */
+    private Win pickWindow() {
+        return pickWindow(false);
+    }
+
+    /**
+     * @param any true = 不做"允许列表"过滤，只排除自己（诊断用）
+     */
+    private Win pickWindow(boolean any) {
+        List<AccessibilityWindowInfo> wins;
         try {
             wins = getWindows();
         } catch (Throwable t) {
             return null;
         }
         if (wins == null) return null;
+        Win best = null;
+        int bestPrio = -1;
+        int bestLayer = -1;
+        long bestArea = 0L;
         for (int i = 0; i < wins.size(); i++) {
             AccessibilityWindowInfo w = wins.get(i);
             if (w == null) continue;
+            AccessibilityNodeInfo r = null;
             try {
-                AccessibilityNodeInfo r = w.getRoot();
+                r = w.getRoot();
                 if (r == null) continue;
                 CharSequence p = r.getPackageName();
-                if (p != null && PKG_VIDHUB.contentEquals(p)) {
-                    try { w.recycle(); } catch (Throwable ignored) { }
-                    return r;          // 交给调用方 recycle
+                String pkg = p == null ? "" : p.toString();
+                if (any) {
+                    if (pkg.isEmpty() || pkg.equals(getPackageName())) continue;
+                } else if (!isSupportedPkg(pkg)) {
+                    continue;
                 }
-                try { r.recycle(); } catch (Throwable ignored) { }
+                android.graphics.Rect rc = new android.graphics.Rect();
+                w.getBoundsInScreen(rc);
+                long area = (long) rc.width() * (long) rc.height();
+                // 不能只挑"面积最大"：后台播放器窗口常常也是全屏，会抢在当前画面前面。
+                // 先看是不是当前活动/聚焦窗口，再看窗口层级，最后才用面积兜底。
+                int prio = w.isActive() ? 2 : (w.isFocused() ? 1 : 0);
+                int layer = w.getLayer();
+                boolean better = prio > bestPrio
+                        || (prio == bestPrio && layer > bestLayer)
+                        || (prio == bestPrio && layer == bestLayer && area > bestArea);
+                if (better) {
+                    if (best != null) recycleQuiet(best.root);
+                    best = new Win();
+                    best.root = r;
+                    best.pkg = pkg;
+                    best.rect = rc;
+                    best.title = w.getTitle();
+                    bestPrio = prio;
+                    bestLayer = layer;
+                    bestArea = area;
+                    r = null;                  // 所有权交给 best
+                }
             } catch (Throwable ignored) {
             } finally {
+                recycleQuiet(r);
                 try { w.recycle(); } catch (Throwable ignored) { }
             }
         }
-        return null;
+        return best;
+    }
+
+    /** VidHub 永远支持；其它应用看"通用播放器模式"开关和黑名单 */
+    private boolean isSupportedPkg(String pkg) {
+        if (pkg == null || pkg.isEmpty()) return false;
+        if (pkg.equals(getPackageName())) return false;
+        if (isSystemish(pkg)) return false;
+        if (inBlacklist(pkg)) return false;
+        return PKG_VIDHUB.equals(pkg) || config.allPlayers;
+    }
+
+    /** 桌面/设置/输入法/systemui 这些地方绝不挂弹幕，否则一开电视就满屏刷 */
+    private boolean isSystemish(String pkg) {
+        return pkg.equals("android")
+                || pkg.startsWith("com.android.systemui")
+                || pkg.startsWith("com.android.settings")
+                || pkg.startsWith("com.android.providers")
+                || pkg.contains("launcher")
+                || pkg.contains("tvhome")
+                || pkg.contains("inputmethod")
+                // 音乐/广播类全屏也有进度条和声音，别给它们挂弹幕
+                || pkg.contains("music")
+                || pkg.contains("radio")
+                || pkg.contains("podcast")
+                || pkg.startsWith("com.google.android.gms");
+    }
+
+    private boolean inBlacklist(String pkg) {
+        String bl = config.blacklist;
+        if (bl == null || bl.isEmpty()) return false;
+        String[] parts = bl.split("[,，;；\\s]+");
+        for (int i = 0; i < parts.length; i++) {
+            String s = parts[i].trim();
+            if (!s.isEmpty() && pkg.equals(s)) return true;
+        }
+        return false;
+    }
+
+    /** 窗口算不算"全屏"：通用模式下只有全屏才当视频，避免把音乐 App 也当成播放器 */
+    private boolean isFullscreen(android.graphics.Rect rc, int sw, int sh) {
+        if (rc == null || sw <= 0 || sh <= 0) return false;
+        return rc.width() >= sw * 0.75f && rc.height() >= sh * 0.65f;
+    }
+
+    private int screenW() {
+        android.util.DisplayMetrics dm = getResources().getDisplayMetrics();
+        return dm.widthPixels > 0 ? dm.widthPixels : 1920;
+    }
+
+    private int screenH() {
+        android.util.DisplayMetrics dm = getResources().getDisplayMetrics();
+        return dm.heightPixels > 0 ? dm.heightPixels : 1080;
+    }
+
+    private static void recycleQuiet(AccessibilityNodeInfo n) {
+        if (n == null) return;
+        try { n.recycle(); } catch (Throwable ignored) { }
+    }
+
+    private static String pkgOf(AccessibilityNodeInfo root) {
+        if (root == null) return "";
+        try {
+            CharSequence p = root.getPackageName();
+            return p == null ? "" : p.toString();
+        } catch (Throwable t) {
+            return "";
+        }
+    }
+
+    /** 应用自己的名字（用来把"窗口标题 = 应用名"这种没用的标题过滤掉） */
+    private final java.util.HashMap<String, String> labelCache = new java.util.HashMap<String, String>();
+
+    private String appLabel(String pkg) {
+        if (pkg == null || pkg.isEmpty()) return "";
+        String c = labelCache.get(pkg);
+        if (c != null) return c;
+        String v = "";
+        try {
+            android.content.pm.ApplicationInfo ai = getPackageManager().getApplicationInfo(pkg, 0);
+            CharSequence l = getPackageManager().getApplicationLabel(ai);
+            v = l == null ? "" : l.toString();
+        } catch (Throwable ignored) { }
+        labelCache.put(pkg, v);
+        return v;
     }
 
     private String activePackage() {
@@ -275,57 +429,100 @@ public class DanmuA11yService extends AccessibilityService {
         @Override
         public void run() {
             if (!sessionActive) return;
-            final String title;
-            final String left;
-            final String right;
-            final boolean noRoot;
-            final boolean inPlayer;
-            final boolean hasPlayerUi;
+            String title = null, left = null, right = null;
+            boolean noRoot, inPlayer, hasPlayerUi = false, generic = false;
+            long delay = POLL_MS;
             final boolean audioActive = isAudioActive();
+            final int sw = screenW(), sh = screenH();
+            Win w = null;
             try {
-                AccessibilityNodeInfo root = getRootInActiveWindow();
-                if (root == null) {
-                    title = null; left = null; right = null; noRoot = true;
-                    inPlayer = true; hasPlayerUi = false;
+                w = pickWindow();
+                if (w == null) {
+                    // 控制栏完全收起 / 窗口根节点拿不到
+                    noRoot = true;
+                    inPlayer = true;
+                    hasPlayerUi = false;
                 } else {
                     noRoot = false;
-                    try {
-                        title = text(root, ID_TITLE);
-                        left = text(root, ID_LEFT);
-                        right = text(root, ID_RIGHT);
-                        CharSequence pn = root.getPackageName();
-                        String pkg = pn == null ? "" : pn.toString();
+                    boolean isVid = PKG_VIDHUB.equals(w.pkg);
+                    boolean full = isFullscreen(w.rect, sw, sh);
+                    if (isVid) {
+                        title = text(w.root, ID_TITLE);
+                        left = text(w.root, ID_LEFT);
+                        right = text(w.root, ID_RIGHT);
+                        hasPlayerUi = title != null || left != null || right != null;
                         // 同一个 VidHub 里还分列表页/详情页。只要无障碍事件说在播放页
                         // （控制栏收起时读不到控件，这很常见），或者确实读到了播放控件，就算播放页
-                        hasPlayerUi = title != null || left != null || right != null;
-                        // 播放页控制栏收起时读不到控件，但声音还在放 —— 这时必须算播放页，
-                        // 否则会被判成"离开播放页"而把会话停掉（重启后最容易踩这个坑）
-                        inPlayer = PKG_VIDHUB.equals(pkg)
-                                && !"other".equals(curActivity)
+                        inPlayer = !"other".equals(curActivity)
                                 && ("play".equals(curActivity) || hasPlayerUi || audioActive);
-                    } finally {
-                        try { root.recycle(); } catch (Throwable ignored) { }
+                    } else {
+                        generic = true;
+                        delay = POLL_MS_GENERIC;
+                        PlayerProbe.Result pr = PlayerProbe.probe(w.root, sw, sh);
+                        left = PlayerProbe.format(pr.posMs);
+                        right = PlayerProbe.format(pr.durMs);
+                        hasPlayerUi = pr.hasTimes;
+                        title = pr.title;
+                        if (title == null && w.title != null) {
+                            String wt = w.title.toString().trim();
+                            // "窗口标题 = 应用名"（MX Player / Kodi…）不是片名，别拿去搜
+                            if (wt.length() >= 2 && !wt.equals(appLabel(w.pkg))
+                                    && !PlayerProbe.looksLikeJunk(wt)) title = wt;
+                        }
+                        // 防抖：连着两轮读到同一个标题才认。窗口标题会闪（显示进度、暂停图标之类），
+                        // 每变一次就去换片会把弹幕拉来拉去。
+                        if (title != null && title.equals(pendingGenericTitle)) {
+                            if (pendingGenericCount < 5) pendingGenericCount++;
+                        } else {
+                            pendingGenericTitle = title;
+                            pendingGenericCount = title == null ? 0 : 1;
+                        }
+                        if (title != null && pendingGenericCount < 2) title = null;
+                        // 通用播放器没有可靠的"页面类型"，只能靠"读到进度条"或"全屏出声"
+                        inPlayer = pr.videoLike || (audioActive && full);
+                        long now2 = SystemClock.uptimeMillis();
+                        if (now2 - lastProbeLogAt > 20000L) {
+                            lastProbeLogAt = now2;
+                            String rep = "包名 " + w.pkg
+                                    + " · 片名 " + (title == null ? "（没认出来）" : title)
+                                    + " · 进度 " + (left == null ? "（没读到）" : left + " / " + right)
+                                    + " · 全屏 " + (full ? "是" : "否");
+                            log("probe " + rep + " · " + pr.sample);
+                            // 存一份，用户按菜单键进设置页就能看到刚才在播放器里认出了什么
+                            getSharedPreferences("danmu", MODE_PRIVATE).edit()
+                                    .putString("lastProbe", rep).apply();
+                        }
                     }
                 }
             } catch (Throwable t) {
                 Log.w(TAG, "poll read error", t);
+                recycleQuiet(w == null ? null : w.root);
                 if (pollHandler != null) pollHandler.postDelayed(this, POLL_MS);
                 return;
             }
+            recycleQuiet(w == null ? null : w.root);
+
+            final String fTitle = title, fLeft = left, fRight = right;
+            final boolean fNoRoot = noRoot, fInPlayer = inPlayer;
+            final boolean fHasUi = hasPlayerUi, fGeneric = generic;
             handler.post(new Runnable() {
                 @Override
                 public void run() {
                     if (!sessionActive) return;
-                    applyPoll(title, left, right, noRoot, inPlayer, hasPlayerUi, audioActive);
+                    applyPoll(fTitle, fLeft, fRight, fNoRoot, fInPlayer, fHasUi, audioActive, fGeneric);
                 }
             });
-            if (pollHandler != null) pollHandler.postDelayed(this, POLL_MS);
+            if (pollHandler != null) pollHandler.postDelayed(this, delay);
         }
     };
 
     private final BroadcastReceiver reloadReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context context, Intent intent) {
+            if (intent != null && "tv.yaohui.danmu.PROBE".equals(intent.getAction())) {
+                runProbe();
+                return;
+            }
             config = DanmuConfig.load(DanmuA11yService.this);
             applyKeyFilter();
             // 数据源可能被换了（测试源 <-> 弹幕API），重建后对当前这集重新拉一次
@@ -352,6 +549,7 @@ public class DanmuA11yService extends AccessibilityService {
         config = DanmuConfig.load(this);
         source = config.newSource();
         IntentFilter f = new IntentFilter("tv.yaohui.danmu.RELOAD");
+        f.addAction("tv.yaohui.danmu.PROBE");
         if (android.os.Build.VERSION.SDK_INT >= 33) {
             registerReceiver(reloadReceiver, f, Context.RECEIVER_NOT_EXPORTED);
         } else {
@@ -397,7 +595,7 @@ public class DanmuA11yService extends AccessibilityService {
         String c = cls == null ? "" : cls.toString();
         String p = pkg == null ? "" : pkg.toString();
 
-        if (c.contains("TVVideoPlayActivity")) {
+        if (PKG_VIDHUB.equals(p) && c.contains("TVVideoPlayActivity")) {
             curActivity = "play";
             // VidHub 详情页里的小窗预览也报同一个播放 Activity，别被它带着反复开层
             if (!sessionActive && SystemClock.uptimeMillis() >= suppressStartUntil) startSession();
@@ -496,6 +694,10 @@ public class DanmuA11yService extends AccessibilityService {
         nudgeCount = 0;
         titleConfirmed = false;      // 还没读到真实片名，现在挂的只是上次缓存
         staleCleared = false;
+        genericSeeded = false;
+        genericNoProgressMs = 0L;
+        pendingGenericTitle = null;
+        pendingGenericCount = 0;
         timeline.reset();
         lastPos = -1L;
         showOverlay();
@@ -563,7 +765,8 @@ public class DanmuA11yService extends AccessibilityService {
         }
         SharedPreferences sp = getSharedPreferences("danmu", MODE_PRIVATE);
         String t = sp.getString("lastTitle", "");
-        if (t == null || t.isEmpty()) return;
+        // 存过 "显示器外部源" / "HDMI1" 这种，说明上次是误识别，别再用它去搜
+        if (t == null || t.isEmpty() || PlayerProbe.looksLikeJunk(t)) return;
         MediaInfo mi = new MediaInfo();
         mi.title = t;
         mi.season = sp.getInt("lastSeason", 0);
@@ -595,7 +798,9 @@ public class DanmuA11yService extends AccessibilityService {
 
     /** 主线程：把后台读到的节点文本应用到时间轴/会话（不碰节点，快） */
     private void applyPoll(String title, String left, String right, boolean noRoot,
-                           boolean inPlayer, boolean hasPlayerUi, boolean audioActive) {
+                           boolean inPlayer, boolean hasPlayerUi, boolean audioActive,
+                           boolean generic) {
+        curGeneric = generic;
         if (noRoot) {
             // 控制栏完全收起时连根节点都拿不到，但"自动补一次进度"不能因此停摆。
             // 不过要是已经离开播放页很久（比如切到别的应用全屏），就别再瞎发按键和提示了。
@@ -632,7 +837,11 @@ public class DanmuA11yService extends AccessibilityService {
             sessionSawUi = true;
             suppressStartUntil = 0L;
         } else if (!sessionSawUi) {
-            if (++quietTick >= 8) {          // 约 2.4 秒
+            // 通用播放器：控制栏收起时本来就一个文本都读不到，只要还在出声就继续。
+            // 位置靠墙钟从 0 推算（读到真实进度会立刻重锚），不能因为读不到控件就收摊。
+            if (generic && audioActive) {
+                quietTick = 0;
+            } else if (++quietTick >= 8) {          // 约 2.4 秒
                 quietTick = 0;
                 suppressStartUntil = SystemClock.uptimeMillis() + 6000L;
                 log("page has no player ui, stop & suppress");
@@ -643,9 +852,35 @@ public class DanmuA11yService extends AccessibilityService {
             quietTick = 0;
         }
 
+        // 通用播放器只有"读到过进度条"才算真视频。电视切到 HDMI 输入源、相册、音乐
+        // 这些界面也全屏也有声，但永远读不到进度，20 秒还读不到就收摊，
+        // 免得一直挂着一层空弹幕还反复去搜一个不存在的片名。
+        if (generic) {
+            if (hasPlayerUi) {
+                genericNoProgressMs = 0L;
+            } else {
+                genericNoProgressMs += POLL_MS_GENERIC;
+                if (genericNoProgressMs >= 20000L) {
+                    genericNoProgressMs = 0L;
+                    suppressStartUntil = SystemClock.uptimeMillis() + 30000L;
+                    log("generic: 20s without progress, not a video page, stop");
+                    stopSession();
+                    return;
+                }
+            }
+        }
+
         {
             long now = SystemClock.uptimeMillis();
             syncAudioState(now, audioActive);
+
+            // 通用播放器读不到进度文本（控制栏收起了）：从 0 开始按墙钟走。
+            // 看剧基本都是从头放，这样弹幕也能对上；一旦读到真实进度会马上重锚纠正。
+            if (generic && audioActive && !genericSeeded && !timeline.hasAnchor()) {
+                genericSeeded = true;
+                timeline.seed(0L, now, true);
+                log("generic: no progress text, tick from 0");
+            }
 
             if (right != null) {
                 long dur = parseTime(right);
@@ -679,6 +914,14 @@ public class DanmuA11yService extends AccessibilityService {
 
     /** 没有进度锚点 / 还没确认片名时的兜底：自动补一次控制栏，实在拿不到就在角落提示 */
     private void tickNoAnchor(long now) {
+        // 通用播放器还一次都没读到过进度条：很可能这一屏根本不是视频
+        // （电视切到 HDMI 输入源、相册、音乐播放页…）。这种情况绝不发"上"键、
+        // 不弹"读不到片名"，否则等于在人家正常看电视时乱按键、乱刷字。
+        // 20 秒还读不到进度，上面的超时判定会把会话收掉。
+        if (curGeneric && !sessionSawUi) {
+            noAnchorMs = 0L;
+            return;
+        }
         boolean needTitle = !titleConfirmed;
         if (!needTitle && timeline.hasAnchor()) {
             noAnchorMs = 0L;
@@ -794,6 +1037,7 @@ public class DanmuA11yService extends AccessibilityService {
         if (switched) {
             // 换片了：上一部的进度绝对不能沿用，否则新片一上来就跑到别的时长上
             timeline.reset();
+            genericSeeded = false;
             lastKnownPos = -1L;
             lastKnownKey = "";
             noAnchorMs = 0L;
@@ -965,7 +1209,52 @@ public class DanmuA11yService extends AccessibilityService {
         log("overlay removed");
     }
 
+    /** 诊断：把当前界面上"能看到的文本"整理成报告发回设置页，用来确认某个播放器认不认得出 */
+    private void runProbe() {
+        if (pollHandler == null) {
+            doProbe();
+        } else {
+            pollHandler.post(new Runnable() {
+                @Override
+                public void run() { doProbe(); }
+            });
+        }
+    }
+
+    private void doProbe() {
+        int sw = screenW(), sh = screenH();
+        Win w = null;
+        String out;
+        try {
+            w = pickWindow(true);
+            if (w == null) {
+                out = "读不到窗口文本。\n播放器可能用了 SurfaceView / 系统限制，或者弹幕服务没连上。";
+            } else {
+                PlayerProbe.Result pr = PlayerProbe.probe(w.root, sw, sh);
+                out = "包名：" + w.pkg
+                        + "\n窗口标题：" + (w.title == null ? "（空）" : w.title.toString())
+                        + "\n识别片名：" + (pr.title == null ? "（没认出来）" : pr.title)
+                        + "\n识别进度：" + (pr.hasTimes
+                        ? PlayerProbe.format(pr.posMs) + " / " + PlayerProbe.format(pr.durMs)
+                        : "（没读到）")
+                        + "\n窗口全屏：" + (isFullscreen(w.rect, sw, sh) ? "是" : "否")
+                        + "\n允许挂弹幕：" + (isSupportedPkg(w.pkg) ? "是" : "否（被排除）")
+                        + "\n界面文本：" + (pr.sample.isEmpty() ? "（无）" : pr.sample);
+            }
+        } catch (Throwable t) {
+            out = "识别出错：" + t;
+        } finally {
+            if (w != null) recycleQuiet(w.root);
+        }
+        log("probe report\n" + out);
+        try {
+            Intent b = new Intent("tv.yaohui.danmu.PROBE_RESULT");
+            b.putExtra("text", out);
+            sendBroadcast(b);
+        } catch (Throwable ignored) { }
+    }
+
     private void log(String msg) {
-        Log.i(TAG, msg);
+        Log.println(android.util.Log.ERROR, TAG, msg);
     }
 }

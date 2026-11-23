@@ -8,8 +8,8 @@
 #   JAVA_HOME                            JDK 根目录（默认取 PATH 里的 javac/java）
 set -e
 
-VERSION=1.0.0
-VCODE=10
+VERSION=1.1.0
+VCODE=11
 NAME=${1:-danmu-tv-$VERSION}
 
 ROOT=$(cd "$(dirname "$0")" && pwd)

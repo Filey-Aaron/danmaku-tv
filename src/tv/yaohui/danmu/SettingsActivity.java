@@ -2,6 +2,7 @@ package tv.yaohui.danmu;
 
 import android.app.Activity;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.graphics.Color;
 import android.os.Bundle;
 import android.provider.Settings;
@@ -35,8 +36,10 @@ public class SettingsActivity extends Activity {
     private TextView summary;
     private TextView sourceState;
     private TextView testResult;
+    private TextView lastProbeView;
     private EditText apiInput;
     private EditText tokenInput;
+    private EditText blacklistInput;
 
     /** 步进器的数值展示，refresh() 时统一刷新 */
     private final java.util.Map<String, TextView> valueViews = new java.util.HashMap<>();
@@ -57,7 +60,7 @@ public class SettingsActivity extends Activity {
         root.setBackgroundColor(0xFF14161A);
 
         TextView title = new TextView(this);
-        title.setText("VidHub 弹幕伴侣");
+        title.setText("电视弹幕伴侣");
         title.setTextSize(30);
         title.setTextColor(Color.WHITE);
         root.addView(title);
@@ -85,6 +88,12 @@ public class SettingsActivity extends Activity {
         testResult.setTextColor(0xFF9AA5B1);
         testResult.setPadding(0, 0, 0, 14);
         root.addView(testResult);
+
+        lastProbeView = new TextView(this);
+        lastProbeView.setTextSize(15);
+        lastProbeView.setTextColor(0xFF7F8C9B);
+        lastProbeView.setPadding(0, 0, 0, 12);
+        root.addView(lastProbeView);
 
         // ---------- 弹幕源 ----------
         root.addView(sectionTitle("弹幕源"));
@@ -119,6 +128,9 @@ public class SettingsActivity extends Activity {
             public void run() {
                 cfg.apiBase = apiInput.getText().toString().trim();
                 cfg.apiToken = tokenInput.getText().toString().trim();
+                if (blacklistInput != null) {
+                    cfg.blacklist = blacklistInput.getText().toString().trim();
+                }
                 cfg.save(SettingsActivity.this);
                 sendBroadcast(new Intent("tv.yaohui.danmu.RELOAD"));
                 refresh();
@@ -130,6 +142,15 @@ public class SettingsActivity extends Activity {
             @Override
             public void run() {
                 testSource();
+            }
+        }));
+
+        root.addView(row("识别当前界面", "看能不能从播放器里读出片名和进度", new Runnable() {
+            @Override
+            public void run() {
+                testResult.setTextColor(0xFF9AA5B1);
+                testResult.setText("正在识别…（读的是屏幕上最大那个窗口）");
+                sendBroadcast(new Intent("tv.yaohui.danmu.PROBE"));
             }
         }));
 
@@ -152,6 +173,18 @@ public class SettingsActivity extends Activity {
                 apply();
             }
         }));
+
+        root.addView(row("所有播放器", "开：Kodi / Plex / Emby / MX / 当贝等全屏播放也挂弹幕", new Runnable() {
+            @Override
+            public void run() {
+                cfg.allPlayers = !cfg.allPlayers;
+                apply();
+                toast(cfg.allPlayers ? "已开启：任意播放器全屏播放都会挂弹幕" : "已关闭：只认 VidHub");
+            }
+        }));
+
+        blacklistInput = input("排除应用", "包名，多个用逗号隔开", cfg.blacklist, false);
+        root.addView(holder(blacklistInput));
 
         root.addView(stepper("字号", "textSize", new Runnable() {
             @Override
@@ -215,8 +248,10 @@ public class SettingsActivity extends Activity {
         }));
 
         TextView hint = new TextView(this);
-        hint.setText("提示：弹幕只在 VidHub 播放器界面出现；进度靠读取播放器界面估算，"
-                + "按键唤出控制栏会自动重新校准。接口地址填自建 danmu_api 的根地址，"
+        hint.setText("提示：默认「所有播放器」模式，任何一个全屏播放视频的 App 都会挂弹幕，"
+                + "片名和进度靠读界面文字猜出来，偶尔认错可以在「排除应用」里填包名排掉。"
+                + "只想要 VidHub 就关掉「所有播放器」。"
+                + "按键唤出控制栏会自动重新校准进度。接口地址填自建 danmu_api 的根地址，"
                 + "开了 token 就填 TOKEN，否则留空。"
                 + "若遥控器长按音量键只能一下一下按，说明「菜单键手势」开着——它需要拦截所有按键才能工作，"
                 + "关掉即可恢复顺手。");
@@ -228,8 +263,38 @@ public class SettingsActivity extends Activity {
         ScrollView sv = new ScrollView(this);
         sv.addView(root);
         setContentView(sv);
+        registerProbeReceiver();
         refresh();
         ensureA11yBound();
+    }
+
+    private android.content.BroadcastReceiver probeReceiver;
+
+    private void registerProbeReceiver() {
+        probeReceiver = new android.content.BroadcastReceiver() {
+            @Override
+            public void onReceive(android.content.Context c, Intent i) {
+                String t = i == null ? null : i.getStringExtra("text");
+                testResult.setTextColor(0xFF8FD6A8);
+                testResult.setText(t == null ? "识别失败：服务没回话" : t);
+            }
+        };
+        IntentFilter pf = new IntentFilter("tv.yaohui.danmu.PROBE_RESULT");
+        try {
+            if (android.os.Build.VERSION.SDK_INT >= 33) {
+                registerReceiver(probeReceiver, pf, android.content.Context.RECEIVER_NOT_EXPORTED);
+            } else {
+                registerReceiver(probeReceiver, pf);
+            }
+        } catch (Throwable ignored) { }
+    }
+
+    @Override
+    protected void onDestroy() {
+        try {
+            if (probeReceiver != null) unregisterReceiver(probeReceiver);
+        } catch (Throwable ignored) { }
+        super.onDestroy();
     }
 
     /** 支持 adb 直接写配置：--es source api --es api http://... --es token xxx */
@@ -422,6 +487,7 @@ public class SettingsActivity extends Activity {
         status.setText("无障碍：" + (a11y ? "已开启" : "未开启")
                 + "　|　悬浮窗：" + (overlay ? "已授权" : "未授权"));
         summary.setText("弹幕 " + (cfg.enabled ? "开" : "关")
+                + "　范围 " + (cfg.allPlayers ? "所有播放器" : "仅 VidHub")
                 + "　字号 " + cfg.textSizePx
                 + "　速度 " + cfg.speedPx
                 + "　不透明度 " + cfg.alphaPct + "%"
@@ -431,6 +497,10 @@ public class SettingsActivity extends Activity {
         setVal("speed", cfg.speedPx + " px/s");
         setVal("alpha", cfg.alphaPct + "%");
         sourceState.setText("当前数据源：" + cfg.sourceLabel());
+        String lp = getSharedPreferences("danmu", MODE_PRIVATE).getString("lastProbe", "");
+        lastProbeView.setText(lp == null || lp.isEmpty()
+                ? "识别记录：还没在任何播放器里识别过"
+                : "识别记录：" + lp);
         if (testResult.getText().length() == 0) {
             testResult.setText("「测试连接」会用最近播过的片名试拉一次，先确认服务器在跑");
         }
@@ -441,7 +511,7 @@ public class SettingsActivity extends Activity {
         int lastEp = getSharedPreferences("danmu", MODE_PRIVATE).getInt("lastEp", 0);
         int lastSeason = getSharedPreferences("danmu", MODE_PRIVATE).getInt("lastSeason", 0);
         if (lastTitle == null || lastTitle.trim().isEmpty()) {
-            toast("还没在播放器里识别到片名，先去 VidHub 播一集");
+            toast("还没在播放器里识别到片名，先去播放器里播一集");
             return;
         }
         cfg.apiBase = apiInput.getText().toString().trim();

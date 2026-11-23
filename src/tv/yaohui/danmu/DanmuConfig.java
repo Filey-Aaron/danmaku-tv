@@ -21,6 +21,13 @@ public class DanmuConfig {
     /** 读不到播放进度时，自动让播放器弹一次控制栏（需要 Root） */
     public boolean autoSync = true;
     /**
+     * 通用播放器模式：不只认 VidHub，任何"全屏 + 有声音 + 有进度条"的播放器都挂弹幕。
+     * 片名/进度靠猜（节点树里的文本形状），所以偶尔会认错，可在 blacklist 里排掉某些应用。
+     */
+    public boolean allPlayers = true;
+    /** 通用模式下不要挂弹幕的包名，逗号或换行分隔 */
+    public String blacklist = "";
+    /**
      * 播放器里连按两次菜单键打开设置页。
      * 代价：开启后所有按键都要经过无障碍服务转发一次，遥控器长按（比如音量连发）会变卡，
      * 只能一下一下按。嫌烦就关掉，改用电脑脚本或 adb 打开设置页。
@@ -43,6 +50,8 @@ public class DanmuConfig {
         c.alphaPct = sp.getInt("alpha", 100);
         c.areaFraction = sp.getFloat("area", 0.4f);
         c.autoSync = sp.getBoolean("autoSync", true);
+        c.allPlayers = sp.getBoolean("allPlayers", true);
+        c.blacklist = sp.getString("blacklist", "");
         c.menuGesture = sp.getBoolean("menuGesture", true);
         c.sourceType = sp.getString("sourceType", SRC_MOCK);
         c.apiBase = sp.getString("apiBase", "");
@@ -58,6 +67,8 @@ public class DanmuConfig {
                 .putInt("alpha", alphaPct)
                 .putFloat("area", areaFraction)
                 .putBoolean("autoSync", autoSync)
+                .putBoolean("allPlayers", allPlayers)
+                .putString("blacklist", blacklist)
                 .putBoolean("menuGesture", menuGesture)
                 .putString("sourceType", sourceType)
                 .putString("apiBase", apiBase)
