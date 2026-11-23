@@ -84,6 +84,22 @@ public class DanmuA11yService extends AccessibilityService {
     private long lastProbeLogAt = 0L;
     /** 这一轮轮询是不是走的"通用播放器"路径（tickNoAnchor 要靠它决定敢不敢发按键） */
     private boolean curGeneric = false;
+    /**
+     * 判定为"不是视频"的包名 → 解禁时间。
+     * 电视切到 HDMI 输入源、或者某个 App 只是全屏放着不出声的视频，只靠"全屏+有声"会
+     * 每 30 秒重开一次弹幕层，闪一下又收，很烦。这里让它在几分钟内安分点；
+     * 但一旦真的读到进度条（hasVideoUi），立刻放行，不会耽误看片。
+     */
+    private final java.util.HashMap<String, Long> nonVideoUntil = new java.util.HashMap<String, Long>();
+    /** 当前盯着的播放器包名（后台线程写、主线程读） */
+    private volatile String curPkg = "";
+
+    /** 只要手上没有"读到过进度条"这个硬凭据，就先别为这个包名重开会话 */
+    private boolean nonVideoSuppressed(String pkg, boolean hasVideoUi) {
+        if (hasVideoUi) return false;
+        Long until = nonVideoUntil.get(pkg);
+        return until != null && SystemClock.uptimeMillis() < until;
+    }
 
     /** 手上这集的弹幕，切换界面/暂停回来时直接复用，不必再问服务器 */
     private List<DanmakuItem> lastItems = null;
@@ -227,6 +243,7 @@ public class DanmuA11yService extends AccessibilityService {
                     // 明确在 VidHub 的列表/详情页：收摊，别在这儿开层、别发按键
                     if (sessionActive) stopSession();
                 } else if (supported && !sessionActive && looksPlaying
+                        && !nonVideoSuppressed(pkg, playerUi)
                         && SystemClock.uptimeMillis() >= suppressStartUntil) {
                     offlineCount = 0;
                     startSession();
@@ -444,6 +461,7 @@ public class DanmuA11yService extends AccessibilityService {
                     hasPlayerUi = false;
                 } else {
                     noRoot = false;
+                    curPkg = w.pkg;
                     boolean isVid = PKG_VIDHUB.equals(w.pkg);
                     boolean full = isFullscreen(w.rect, sw, sh);
                     if (isVid) {
@@ -863,6 +881,9 @@ public class DanmuA11yService extends AccessibilityService {
                 if (genericNoProgressMs >= 20000L) {
                     genericNoProgressMs = 0L;
                     suppressStartUntil = SystemClock.uptimeMillis() + 30000L;
+                    if (!curPkg.isEmpty()) {                 // 5 分钟内别再为它开层
+                        nonVideoUntil.put(curPkg, SystemClock.uptimeMillis() + 5L * 60L * 1000L);
+                    }
                     log("generic: 20s without progress, not a video page, stop");
                     stopSession();
                     return;
