@@ -1,7 +1,7 @@
 @echo off
 setlocal
 rem 改成你电视的 IP（电视: 设置 - 关于 - 状态信息）
-set TV=192.168.1.50:5555
+set TV=192.168.1.159:5555
 
 echo Connecting to TV %TV% ...
 adb connect %TV% >nul 2>&1

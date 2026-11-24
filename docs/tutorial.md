@@ -94,7 +94,7 @@ adb push tools/95-danmu-a11y.sh /data/local/tmp/95.sh
 adb shell su -c 'cp /data/local/tmp/95.sh /data/adb/service.d/95-danmu-a11y.sh && chmod 755 /data/adb/service.d/95-danmu-a11y.sh'
 ```
 
-脚本在开机完成后把本服务追加回无障碍列表，并长期盯着（前 15 分钟每 15 秒查一次，之后每 5 分钟一次）。
+脚本常驻盯着（每 20 秒一次）：列表里没有本服务就追加回去；列表里有但进程已经没了，会连续确认三次后强制重建一次绑定。
 日志：`/data/local/tmp/danmu-a11y.log`。
 
 没有 Root 也没关系，失效时手动重新打开一次无障碍开关即可。
