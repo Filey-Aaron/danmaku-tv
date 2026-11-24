@@ -41,6 +41,17 @@ public class DanmuConfig {
     /** danmu_api 的 TOKEN，留空表示用默认 87654321（免 token） */
     public String apiToken = "";
 
+    /**
+     * 影响"弹幕长什么样 / 从哪来"的那部分配置的指纹。
+     * 服务每 1.5 秒拿它和自己手上的比一次，变了就重载 ——
+     * 比广播可靠：设置页和服务在同一个进程，改完立刻就能被看见。
+     */
+    public String signature() {
+        return enabled + "|" + textSizePx + "|" + speedPx + "|" + alphaPct + "|" + areaFraction
+                + "|" + autoSync + "|" + allPlayers + "|" + blacklist + "|" + menuGesture
+                + "|" + sourceType + "|" + apiBase + "|" + apiToken;
+    }
+
     public static DanmuConfig load(Context ctx) {
         SharedPreferences sp = ctx.getSharedPreferences(PREF, Context.MODE_PRIVATE);
         DanmuConfig c = new DanmuConfig();

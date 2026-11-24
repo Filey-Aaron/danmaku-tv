@@ -231,6 +231,7 @@ public class DanmuA11yService extends AccessibilityService {
     private void guardWith(String pkg, boolean audioActive, boolean playerUi, boolean fullscreen) {
         {
             try {
+                reconcileConfig();
                 boolean isVid = PKG_VIDHUB.equals(pkg);
                 boolean supported = isSupportedPkg(pkg);
                 // VidHub 的列表页/详情页跟播放页是同一个包名，光看包名会在详情页
@@ -585,33 +586,52 @@ public class DanmuA11yService extends AccessibilityService {
                 runProbe();
                 return;
             }
-            config = DanmuConfig.load(DanmuA11yService.this);
-            applyKeyFilter();
-            // 「隐藏弹幕」= 只把弹幕层撤掉，服务/会话/按键手势全都照旧活着。
-            // 别在这里 stopSession：一停，用户再点「显示弹幕」就得等重新进播放页，
-            // 体验上就像整个应用被关掉了。
-            if (!config.enabled) {
-                hideOverlay();
-                log("danmu hidden, service still alive");
-                return;
-            }
-            // 数据源可能被换了（测试源 <-> 弹幕API），重建后对当前这集重新拉一次
-            source = config.newSource();
-            currentKey = "";
-            lastItems = null;
-            lastItemsKey = "";
-            lastPos = -1L;
-            // 重新显示：先把层挂回来，再把手上这集铺回去，不用重进播放页
-            if (!settingsOpen) showOverlay();
-            if (overlay != null) {
-                overlay.setConfig(config);
-                overlay.clearDanmaku();
-            }
-            log("config reload, source=" + source.name());
-            // 不等控制栏，直接按记下来的作品重拉
-            restoreMedia();
+            log("reload broadcast");
+            applyConfigReload();
         }
     };
+
+    /**
+     * 重新读配置并落到运行状态里。设置页改完就调这个。
+     * 注意：只处理「显示/隐藏」和「数据源」，不会 stopSession —— 隐藏弹幕只是不显示，
+     * 服务、按键手势、已拉到的弹幕都留着，再点「显示弹幕」立刻能铺回去。
+     */
+    private void applyConfigReload() {
+        config = DanmuConfig.load(this);
+        applyKeyFilter();
+        if (!config.enabled) {
+            hideOverlay();
+            log("danmu hidden, service still alive");
+            return;
+        }
+        // 数据源可能被换了（测试源 <-> 弹幕API），重建后对当前这集重新拉一次
+        source = config.newSource();
+        currentKey = "";
+        lastItems = null;
+        lastItemsKey = "";
+        lastPos = -1L;
+        // 重新显示：先把层挂回来，再把手上这集铺回去，不用重进播放页
+        if (!settingsOpen) showOverlay();
+        if (overlay != null) {
+            overlay.setConfig(config);
+            overlay.clearDanmaku();
+        }
+        log("config reload, source=" + source.name());
+        // 不等控制栏，直接按记下来的作品重拉
+        restoreMedia();
+    }
+
+    /**
+     * 兜底同步：设置页和服务在同一个进程里改 SharedPreferences，
+     * 但广播偶尔收不到（实测踩过），所以每轮 guard 顺手比一次配置指纹。
+     * 读的是进程内缓存，开销可以忽略；只有真变了才走一次重载。
+     */
+    private void reconcileConfig() {
+        DanmuConfig now = DanmuConfig.load(this);
+        if (config != null && now.signature().equals(config.signature())) return;
+        log("config drift, re-apply");
+        applyConfigReload();
+    }
 
     @Override
     protected void onServiceConnected() {
