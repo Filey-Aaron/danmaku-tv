@@ -34,6 +34,7 @@ log "guard start (pid $$)"
 missing=0
 dead=0
 beat=0
+chk=0
 
 while true; do
   CUR=$(settings get secure enabled_accessibility_services 2>/dev/null)
@@ -58,6 +59,28 @@ while true; do
           settings put secure accessibility_enabled 1
           log "restart: process gone 3x, rebind [$CUR]"
           dead=0
+        fi
+      fi
+
+      # 更隐蔽的一种状态：进程活着（比如用户刚打开过设置页），
+      # 但无障碍服务并没有真的被系统绑上 —— 多半是被 force-stop / 覆盖安装弄的。
+      # 这种时候列表、进程都正常，菜单键却收不到，所以每 4 轮（约 80 秒）查一次。
+      chk=$((chk + 1))
+      if [ $chk -ge 4 ]; then
+        chk=0
+        if ! dumpsys activity services "$PKG" 2>/dev/null | grep -q "ServiceRecord.*DanmuA11yService"; then
+          BARE=$(strip_me "$CUR")
+          if [ -z "$BARE" ]; then
+            settings put secure enabled_accessibility_services ""
+            sleep 2
+            settings put secure enabled_accessibility_services "$ME"
+          else
+            settings put secure enabled_accessibility_services "$BARE"
+            sleep 2
+            settings put secure enabled_accessibility_services "$BARE:$ME"
+          fi
+          settings put secure accessibility_enabled 1
+          log "restart: service not bound, rebind"
         fi
       fi
       ;;

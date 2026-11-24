@@ -99,6 +99,36 @@ public class SettingsActivity extends Activity {
         lastProbeView.setPadding(0, 0, 0, 12);
         root.addView(lastProbeView);
 
+        // ---------- 弹幕显示开关（放最上面，一眼就能按到） ----------
+        // 按钮文字写成「动作」（按下去会发生什么），右侧常驻显示当前状态。
+        // 注意：这里只是「显示/隐藏」，服务、按键手势、数据源全都保持运行。
+        LinearLayout switchBox = new LinearLayout(this);
+        switchBox.setOrientation(LinearLayout.HORIZONTAL);
+        switchBox.setGravity(Gravity.CENTER_VERTICAL);
+        switchBox.setPadding(0, 6, 0, 16);
+
+        danmuBtn = new Button(this);
+        danmuBtn.setTextSize(20);
+        danmuBtn.setFocusable(true);
+        danmuBtn.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                cfg.enabled = !cfg.enabled;
+                apply();
+                toast(cfg.enabled ? "弹幕已显示，回播放页就能看到"
+                        : "弹幕已隐藏，回到播放页也不再显示（服务仍在运行）");
+            }
+        });
+        LinearLayout.LayoutParams danmuLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        danmuLp.rightMargin = 28;
+        switchBox.addView(danmuBtn, danmuLp);
+
+        danmuState = new TextView(this);
+        danmuState.setTextSize(20);
+        switchBox.addView(danmuState);
+        root.addView(switchBox);
+
         // ---------- 弹幕源 ----------
         root.addView(sectionTitle("弹幕源"));
 
@@ -170,33 +200,7 @@ public class SettingsActivity extends Activity {
             }
         }));
 
-        // 弹幕总开关：按钮文字写成「动作」（按下去会发生什么），右侧常驻显示当前状态
-        LinearLayout switchBox = new LinearLayout(this);
-        switchBox.setOrientation(LinearLayout.HORIZONTAL);
-        switchBox.setGravity(Gravity.CENTER_VERTICAL);
-        switchBox.setPadding(0, 8, 0, 8);
-
-        danmuBtn = new Button(this);
-        danmuBtn.setTextSize(18);
-        danmuBtn.setFocusable(true);
-        danmuBtn.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                cfg.enabled = !cfg.enabled;
-                apply();
-                toast(cfg.enabled ? "弹幕已开启，回到播放页就能看到"
-                        : "弹幕已关闭，播放器里不再显示");
-            }
-        });
-        LinearLayout.LayoutParams danmuLp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        danmuLp.rightMargin = 28;
-        switchBox.addView(danmuBtn, danmuLp);
-
-        danmuState = new TextView(this);
-        danmuState.setTextSize(18);
-        switchBox.addView(danmuState);
-        root.addView(switchBox);
+        // 弹幕总开关已经移到页面顶部，这里不再重复
 
         root.addView(row("所有播放器", "开：Kodi / Plex / Emby / MX / 当贝等全屏播放也挂弹幕", new Runnable() {
             @Override
@@ -512,13 +516,13 @@ public class SettingsActivity extends Activity {
                 + "　|　悬浮窗：" + (overlay ? "已授权" : "未授权"));
         if (danmuBtn != null) {
             // 按钮写"按下去会怎样"，右侧写"现在是怎样"，一眼能分清
-            danmuBtn.setText(cfg.enabled ? "关闭弹幕" : "开启弹幕");
+            danmuBtn.setText(cfg.enabled ? "隐藏弹幕" : "显示弹幕");
         }
         if (danmuState != null) {
-            danmuState.setText(cfg.enabled ? "● 正在显示" : "○ 已关闭");
+            danmuState.setText(cfg.enabled ? "● 显示中" : "○ 已隐藏");
             danmuState.setTextColor(cfg.enabled ? 0xFF8FD6A8 : 0xFF9AA5B1);
         }
-        summary.setText("弹幕 " + (cfg.enabled ? "开" : "关")
+        summary.setText("弹幕 " + (cfg.enabled ? "显示" : "隐藏")
                 + "　范围 " + (cfg.allPlayers ? "所有播放器" : "仅 VidHub")
                 + "　字号 " + cfg.textSizePx
                 + "　速度 " + cfg.speedPx

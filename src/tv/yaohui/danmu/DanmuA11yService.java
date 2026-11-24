@@ -130,6 +130,9 @@ public class DanmuA11yService extends AccessibilityService {
     /** 已经把"未确认片名"的旧弹幕清掉了吗（每个会话只清一次） */
     private boolean staleCleared = false;
 
+    /** 设置页在前台：把弹幕层临时撤掉，别盖在自己的界面上 */
+    private boolean settingsOpen = false;
+
     /**
      * 读不到进度时，用 root 发一个"上"键，让播放器把控制栏弹出来。
      * 上键只显示控制栏，不会暂停（确定键才会）。没 root 就静默放弃，退回到画面提示。
@@ -584,13 +587,12 @@ public class DanmuA11yService extends AccessibilityService {
             }
             config = DanmuConfig.load(DanmuA11yService.this);
             applyKeyFilter();
-            // 总开关被关掉：立刻把已经挂在屏幕上的层撤掉。
-            // 只 clearDanmaku 的话窗口还在，底下 restoreMedia 又会把弹幕拉回来，
-            // 用户在设置里明明关了，回播放页却发现弹幕还在 —— 所以这里直接收摊返回。
+            // 「隐藏弹幕」= 只把弹幕层撤掉，服务/会话/按键手势全都照旧活着。
+            // 别在这里 stopSession：一停，用户再点「显示弹幕」就得等重新进播放页，
+            // 体验上就像整个应用被关掉了。
             if (!config.enabled) {
-                if (sessionActive) stopSession();
                 hideOverlay();
-                log("danmu disabled, overlay removed");
+                log("danmu hidden, service still alive");
                 return;
             }
             // 数据源可能被换了（测试源 <-> 弹幕API），重建后对当前这集重新拉一次
@@ -599,6 +601,8 @@ public class DanmuA11yService extends AccessibilityService {
             lastItems = null;
             lastItemsKey = "";
             lastPos = -1L;
+            // 重新显示：先把层挂回来，再把手上这集铺回去，不用重进播放页
+            if (!settingsOpen) showOverlay();
             if (overlay != null) {
                 overlay.setConfig(config);
                 overlay.clearDanmaku();
@@ -662,6 +666,29 @@ public class DanmuA11yService extends AccessibilityService {
         CharSequence pkg = event.getPackageName();
         String c = cls == null ? "" : cls.toString();
         String p = pkg == null ? "" : pkg.toString();
+
+        // 自己的界面：设置页开着的时候绝不能有弹幕盖在上面
+        // （弹幕是系统悬浮窗，不处理的话会一直压在设置页上方，看着就像界面坏了）
+        if (getPackageName().equals(p)) {
+            if (c.contains("SettingsActivity") && !settingsOpen) {
+                settingsOpen = true;
+                hideOverlay();
+                log("settings open -> overlay hidden");
+            }
+            return;
+        }
+
+        // 界面从设置页切走了（回到播放器/桌面都算）：把弹幕层挂回来
+        if (settingsOpen && !p.isEmpty()) {
+            settingsOpen = false;
+            if (config.enabled && sessionActive) {
+                showOverlay();
+                if (overlay != null && lastItems != null && lastItemsKey.equals(currentKey)) {
+                    overlay.setItems(lastItems);
+                }
+                log("settings closed -> overlay restored");
+            }
+        }
 
         if (PKG_VIDHUB.equals(p) && c.contains("TVVideoPlayActivity")) {
             curActivity = "play";
@@ -1322,7 +1349,8 @@ public class DanmuA11yService extends AccessibilityService {
             overlay = null;
         }
         if (overlay != null) return;
-        if (!config.enabled) return;
+        if (settingsOpen) return;      // 设置页在前台，别往它上面盖弹幕
+        if (!config.enabled) return;   // 用户选了「隐藏弹幕」
         final OverlayView v = new OverlayView(this);
         v.setTimeline(timeline);
         v.setConfig(config);
