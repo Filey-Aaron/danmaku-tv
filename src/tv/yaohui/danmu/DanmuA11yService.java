@@ -584,6 +584,15 @@ public class DanmuA11yService extends AccessibilityService {
             }
             config = DanmuConfig.load(DanmuA11yService.this);
             applyKeyFilter();
+            // 总开关被关掉：立刻把已经挂在屏幕上的层撤掉。
+            // 只 clearDanmaku 的话窗口还在，底下 restoreMedia 又会把弹幕拉回来，
+            // 用户在设置里明明关了，回播放页却发现弹幕还在 —— 所以这里直接收摊返回。
+            if (!config.enabled) {
+                if (sessionActive) stopSession();
+                hideOverlay();
+                log("danmu disabled, overlay removed");
+                return;
+            }
             // 数据源可能被换了（测试源 <-> 弹幕API），重建后对当前这集重新拉一次
             source = config.newSource();
             currentKey = "";
